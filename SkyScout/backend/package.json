@@ -1,0 +1,26 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "worker": "node worker.js",
+    "worker:once": "node worker.js --once",
+    "test": "node --test",
+    "test:e2e": "node scripts/e2e-api.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^2.29.1",
+    "axios": "^1.18.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^5.0.0",
+    "mongodb": "^7.5.0",
+    "mongoose": "^9.7.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  }
+}

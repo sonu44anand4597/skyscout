@@ -1,0 +1,32 @@
+# Terminate HTTPS at your host ingress/load balancer. MongoDB stays in the
+# existing external replica-set deployment; no new database is created.
+services:
+  api:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      MONITORING_ENABLED: 'false'
+      TRUST_PROXY: '1'
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+  worker:
+    build: ./backend
+    command: [node, worker.js]
+    env_file: ./backend/.env
+    environment:
+      NODE_ENV: production
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    healthcheck:
+      disable: true
+  web:
+    build: .
+    ports: ['127.0.0.1:8080:80']
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

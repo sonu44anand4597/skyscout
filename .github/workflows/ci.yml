@@ -1,0 +1,122 @@
+name: SkyScout checks
+on: [push, pull_request]
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  javascript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: SkyScout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            SkyScout/package-lock.json
+            SkyScout/backend/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix backend
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=high
+      - run: npm audit --prefix backend --audit-level=high
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: SkyScout/dist
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_ENV: test
+      MONITORING_ENABLED: 'false'
+      MONGODB_URI: mongodb://127.0.0.1:27017/skyscout_ci?replicaSet=rs0
+      CLIENT_ORIGINS: http://127.0.0.1:5173
+      E2E_API_URL: http://127.0.0.1:5000/api
+      E2E_WEB_URL: http://127.0.0.1:5173
+      CHROME_PATH: /usr/bin/google-chrome
+      QA_OUTPUT_DIR: ../docs/qa/ci-integration
+      # No paid provider keys. Browser fare fixtures are isolated in the QA script.
+      SERPAPI_API_KEY: ''
+      GEMINI_API_KEY: ''
+      GOOGLE_MAPS_API_KEY: ''
+    defaults:
+      run:
+        working-directory: SkyScout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            SkyScout/package-lock.json
+            SkyScout/backend/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix backend
+      - name: Start isolated MongoDB replica set
+        run: |
+          docker run --detach --name skyscout-mongo --publish 127.0.0.1:27017:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          for attempt in {1..60}; do
+            if docker exec skyscout-mongo mongosh --quiet --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'; then break; fi
+            sleep 1
+          done
+          docker exec skyscout-mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          for attempt in {1..60}; do
+            if docker exec skyscout-mongo mongosh --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Real HTTP/database and browser fixture journeys
+        run: |
+          test -x "$CHROME_PATH"
+          (cd backend && node server.js) > /tmp/skyscout-api.log 2>&1 &
+          api_pid=$!
+          npm run dev -- --host 127.0.0.1 --port 5173 --strictPort > /tmp/skyscout-web.log 2>&1 &
+          web_pid=$!
+          trap 'kill "$api_pid" "$web_pid" 2>/dev/null || true' EXIT
+          node --input-type=module -e 'for (const url of ["http://127.0.0.1:5000/readyz","http://127.0.0.1:5173"]) { let ready=false; for(let i=0;i<60;i++){try{ready=(await fetch(url)).ok}catch{} if(ready)break; await new Promise(r=>setTimeout(r,1000))} if(!ready)throw new Error(`Not ready: ${url}`) }'
+          (cd backend && npm run test:e2e)
+          (cd backend && node scripts/verify-concurrency.mjs)
+          (cd backend && node scripts/verify-dashboard-navigation.mjs)
+          npm run build
+          (cd backend && node scripts/verify-production-browser.mjs)
+      - name: Upload integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-evidence
+          path: |
+            SkyScout/docs/qa/ci-integration
+            /tmp/skyscout-api.log
+            /tmp/skyscout-web.log
+          if-no-files-found: warn
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: SkyScout/ml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: SkyScout/ml/.python-version
+          cache: pip
+          cache-dependency-path: SkyScout/ml/requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pip check
+      - run: python -m compileall -q -x '/(data|artifacts|\.venv)/' .
+      - run: python -m unittest discover -s . -p 'test_*.py'
+      # Test artifacts are generated only in temporary folders. No retraining,
+      # production weights, live paid credentials or network data are required.
+      - run: python -m pip install pip-audit
+      - run: python -m pip_audit --strict

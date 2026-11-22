@@ -1,0 +1,17 @@
+{
+  "BOM": {
+    "name": "Chhatrapati Shivaji Maharaj International Airport",
+    "aliases": ["Bombay"],
+    "source": "https://csmia-mumbai.adaniairports.com/en/"
+  },
+  "BLR": {
+    "name": "Kempegowda International Airport",
+    "city": "Bengaluru",
+    "aliases": ["Bangalore", "Bengaluru International Airport"],
+    "source": "https://www.pib.gov.in/newsite/PrintRelease.aspx?relid=97275"
+  },
+  "DEL": { "aliases": ["Delhi"] },
+  "CCU": { "aliases": ["Calcutta", "Netaji Subhas Chandra Bose"] },
+  "MAA": { "aliases": ["Madras"] },
+  "SEN": { "aliases": ["London Southend"] }
+}

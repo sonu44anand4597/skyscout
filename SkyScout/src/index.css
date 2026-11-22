@@ -1,0 +1,69 @@
+@import "tailwindcss";
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+html { scroll-padding-top: 6rem; }
+body {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  margin: 0;
+}
+
+html.dark, html.dark body { background: #0f1724; color: #e8edf5; }
+html.dark .bg-white { background-color: #1b2636 !important; }
+html.dark .bg-white\/90 { background-color: rgb(27 38 54 / 94%) !important; }
+html.dark .bg-slate-50, html.dark .bg-gray-100 { background-color: #111c2b !important; }
+html.dark .bg-slate-100, html.dark .bg-gray-200 { background-color: #253246 !important; }
+html.dark .bg-slate-200, html.dark .bg-slate-300 { background-color: #344258 !important; }
+html.dark .bg-slate-950 { background-color: #172133 !important; }
+html.dark .bg-violet-50, html.dark .bg-violet-100 { background-color: #302743 !important; }
+html.dark .bg-amber-50, html.dark .bg-amber-100, html.dark .bg-yellow-100 { background-color: #403322 !important; }
+html.dark .bg-rose-100, html.dark .bg-red-50, html.dark .bg-red-100 { background-color: #432a35 !important; }
+html.dark .bg-emerald-50, html.dark .bg-emerald-100, html.dark .bg-green-50, html.dark .bg-green-100 { background-color: #213d35 !important; }
+html.dark .bg-blue-100 { background-color: #26384b !important; }
+html.dark .text-slate-900, html.dark .text-slate-800, html.dark .text-gray-900, html.dark .text-gray-800 { color: #edf2fa !important; }
+html.dark .text-slate-700, html.dark .text-slate-600, html.dark .text-gray-700, html.dark .text-gray-600 { color: #c6d2e2 !important; }
+html.dark .text-slate-500, html.dark .text-slate-400, html.dark .text-gray-500, html.dark .text-gray-400 { color: #a9b8cb !important; }
+html.dark .text-violet-600, html.dark .text-violet-700, html.dark .text-violet-800, html.dark .text-violet-900 { color: #c6a6ff !important; }
+html.dark .text-amber-700, html.dark .text-amber-800, html.dark .text-amber-900, html.dark .text-yellow-700 { color: #f6cf8e !important; }
+html.dark .text-red-600, html.dark .text-red-700, html.dark .text-red-800, html.dark .text-rose-600, html.dark .text-rose-700, html.dark .text-rose-800 { color: #ffacb9 !important; }
+html.dark .text-emerald-700, html.dark .text-emerald-800, html.dark .text-green-600, html.dark .text-green-700 { color: #9ce2c5 !important; }
+html.dark .text-blue-700 { color: #a8c9f5 !important; }
+html.dark .border-slate-100, html.dark .border-slate-200, html.dark .border-slate-300, html.dark .border-gray-100, html.dark .border-gray-200, html.dark .border-gray-300 { border-color: #37455b !important; }
+html.dark .border-violet-100, html.dark .border-violet-200, html.dark .border-violet-300 { border-color: #55466d !important; }
+html.dark .border-amber-200 { border-color: #745b36 !important; }
+html.dark .border-emerald-200 { border-color: #3d695c !important; }
+html.dark .border-red-200 { border-color: #744653 !important; }
+html.dark input, html.dark select, html.dark textarea { background-color: #172133; color: #edf2fa; border-color: #526075; }
+html.dark input::placeholder, html.dark textarea::placeholder { color: #9aaac0; }
+html.dark input:disabled, html.dark select:disabled, html.dark textarea:disabled { background-color: #263246; color: #a9b8cb; }
+html.dark #flight-search { background-image: linear-gradient(180deg, #1a2233, #151e2c 55%, #0f1724) !important; }
+html.dark select option { background-color: #1b2636; color: #edf2fa; }
+html.dark :where(a, button, input, select, textarea, summary):focus-visible { outline-color: #cfb3ff; }
+
+:where(a, button, input, select, textarea, summary):focus-visible {
+  outline: 3px solid #7c3aed;
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

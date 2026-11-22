@@ -1,0 +1,15 @@
+node_modules
+backend/node_modules
+ml/.venv
+ml/.qa-tmp
+ml/data
+ml/artifacts
+**/__pycache__
+.git
+.env
+.env.*
+backend/.env
+**/*.log
+qa-artifacts
+docs/qa
+dist
