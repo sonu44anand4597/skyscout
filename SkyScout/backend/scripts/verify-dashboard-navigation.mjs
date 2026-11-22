@@ -164,7 +164,7 @@ try {
   assert.equal(await evaluate(`document.querySelector('#tracked-flight-${trackedId} input[type="number"]').value`), '10000');
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
   await until(async () => (await TrackedFlight.findById(trackedId).lean()).targetPrice === 10000, 'target persisted');
-  await until(() => evaluate(`!document.querySelector('#tracked-flight-${trackedId} button').disabled`), 'target update rendered');
+  await until(() => evaluate(`!document.querySelector('#tracked-flight-${trackedId} button')?.disabled`), 'target update rendered');
   await evaluate(`Array.from(document.querySelectorAll('#tracked-flight-${trackedId} button')).find(b=>b.textContent==='Check fare').click()`);
   await until(() => evaluate(`window.__qaRequests.some(r=>r.path==='/api/tracked-flights/${trackedId}/refresh'&&r.status===202)`), 'manual check queued');
   assert.equal((await TrackedFlight.findById(trackedId).lean()).currentPrice, 10500);
@@ -194,3 +194,4 @@ finally {
   await ProviderState.deleteMany({ key: { $in: refs.map(ref => `track:${ref}`) } });
   await closeDatabase(); await mkdir(output, { recursive: true }); await writeFile(`${output}/dashboard-navigation.json`, JSON.stringify(evidence, null, 2)); console.log(JSON.stringify(evidence));
 }
+
