@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: skyscout-free-demo
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: SkyScout
+    buildCommand: npm ci && npm run build && npm ci --prefix backend --omit=dev
+    startCommand: npm run start --prefix backend
+    healthCheckPath: /readyz
+    envVars:
+      - key: NODE_VERSION
+        value: 24.22.1
+      - key: NODE_ENV
+        value: production
+      - key: SERVE_WEB
+        value: "true"
+      - key: VITE_API_URL
+        value: /api
+      - key: TRUST_PROXY
+        value: "1"
+      - key: SESSION_SAME_SITE
+        value: Lax
+      - key: MONITORING_ENABLED
+        value: "true"
+      - key: MONGODB_URI
+        sync: false
+      - key: SERPAPI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPERATIONS_TOKEN
+        generateValue: true

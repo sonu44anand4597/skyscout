@@ -12,4 +12,5 @@ test('production refuses missing storage, insecure origins and invalid cookie/pr
   assert.throws(() => validateRuntime({ NODE_ENV: 'production', MONGODB_URI: 'fixture', CLIENT_ORIGINS: ', , ' }), /CLIENT_ORIGINS/);
   for (const PORT of ['0', '65536', 'server-pipe', '-1']) assert.throws(() => validateRuntime({ PORT }), /PORT/);
   assert.deepEqual(validateRuntime({ NODE_ENV: 'production', MONGODB_URI: 'fixture', CLIENT_ORIGINS: 'https://one.example,https://two.example', SESSION_SAME_SITE: 'None', TRUST_PROXY: '1' }).origins, ['https://one.example', 'https://two.example']);
+  assert.deepEqual(validateRuntime({ NODE_ENV: 'production', MONGODB_URI: 'fixture', RENDER_EXTERNAL_URL: 'https://skyscout-demo.onrender.com', TRUST_PROXY: '1' }).origins, ['https://skyscout-demo.onrender.com']);
 });

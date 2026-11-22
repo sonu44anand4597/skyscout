@@ -1,5 +1,6 @@
 export function allowedOrigins(env = process.env) {
-  return (env.CLIENT_ORIGINS || env.CLIENT_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173')
+  const defaults = env.NODE_ENV === 'production' ? '' : 'http://localhost:5173,http://127.0.0.1:5173';
+  return (env.CLIENT_ORIGINS || env.CLIENT_ORIGIN || env.RENDER_EXTERNAL_URL || defaults)
     .split(',').map((origin) => origin.trim()).filter(Boolean).map((origin) => {
       const url = new URL(origin);
       if (!['http:', 'https:'].includes(url.protocol) || url.origin !== origin) throw new Error('CLIENT_ORIGINS must contain exact HTTP origins without paths.');
@@ -11,7 +12,7 @@ export function validateRuntime(env = process.env) {
   const origins = allowedOrigins(env);
   if (env.NODE_ENV === 'production') {
     if (!env.MONGODB_URI) throw new Error('MONGODB_URI is required in production.');
-    if ((!env.CLIENT_ORIGIN && !env.CLIENT_ORIGINS) || !origins.length) throw new Error('Configure the production CLIENT_ORIGINS allowlist.');
+    if ((!env.CLIENT_ORIGIN && !env.CLIENT_ORIGINS && !env.RENDER_EXTERNAL_URL) || !origins.length) throw new Error('Configure the production CLIENT_ORIGINS allowlist.');
     if (origins.some((origin) => !origin.startsWith('https://'))) throw new Error('Production client origins must use HTTPS.');
   }
   if (env.SESSION_SAME_SITE && !['lax', 'strict', 'none'].includes(env.SESSION_SAME_SITE.toLowerCase())) throw new Error('SESSION_SAME_SITE must be lax, strict or none.');

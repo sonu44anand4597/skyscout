@@ -1,289 +1,1 @@
-# Deploying the existing SkyScout application
-
-This repository provides API, independent worker, static-web and optional ML
-container definitions. Run image builds, image scans and host-specific smoke
-checks in the deployment environment before release. Local QA output is not
-included in the public source repository.
-
-The app requires a reachable MongoDB replica set or sharded cluster. Confirm
-outbound DNS/TLS access and the Atlas access list from the deployment host; do
-not open unrestricted database access for production.
-
-For containerized inference, use:
-
-```sh
-docker compose -f compose.yaml -f compose.ml.yaml config
-docker compose -f compose.yaml -f compose.ml.yaml build
-docker compose -f compose.yaml -f compose.ml.yaml up -d
-```
-
-The ML overlay points API/worker requests at the private `ml:8001` service and
-mounts evaluated artifacts read-only from `${SKYSCOUT_MODEL_DIR:-./ml/artifacts}`.
-The ML build context is the app root because inference uses the shared airport
-timezone catalog. No checkpoint or training data is baked into the image. Missing
-artifacts keep `/readyz` unavailable. Retain one supervised inference process per
-allocated model-memory budget; no unmeasured throughput claim is made.
-
-## Required services and configuration
-
-- Node 24; use `npm ci` in both the app and `backend` directories.
-- A reachable MongoDB replica set or sharded cluster. Tracking, quote commits,
-  notification persistence and deletion use transactions. A standalone MongoDB
-  process does not satisfy this requirement.
-- Private SerpApi and Gemini credentials. Set provider budgets to your actual
-  plan; this repository does not assert provider prices or entitlements.
-- Google Maps Routes API, an enabled billing account and a properly restricted
-  server credential for genuine road routes. An API key for legacy Directions
-  alone is insufficient. Configure `GOOGLE_MAPS_API_KEY` on the backend.
-- HTTPS ingress and exact `CLIENT_ORIGINS`, for example
-  `https://your-actual-host.example`. Production startup rejects HTTP origins.
-- `SESSION_SAME_SITE=Lax` for the same-site web/API deployment. If intentionally
-  deploying across sites, use `None` with production Secure cookies and retain
-  the exact CORS allowlist and CSRF header. Host-only HttpOnly cookies are used.
-- Set `TRUST_PROXY` to the actual trusted hop count, and prevent direct public
-  access to API replicas. The provided nginx proxy overwrites forwarded IP
-  headers; adapt trusted-ingress address handling to the real host topology.
-- Set `MONITORING_ENABLED=false` in HTTP replicas. Run `npm run worker` in an
-  always-on process managed by Docker, systemd or the chosen host's worker role.
-  It rechecks due records approximately every six hours and recovers expired
-  leases after restart. Do not run this timer in a sleeping serverless service.
-
-For an external scheduler, run `cd backend && npm run worker:once` once per
-minute. Each invocation takes at most four due jobs; provision enough invocations
-or worker instances for the actual backlog. Concurrent instances claim exclusive,
-owner-fenced database leases. Permanent query/configuration errors or six
-consecutive failures stop a track in `unresolved` until reviewed and resumed.
-
-The ML service is optional and independent. Install `ml/requirements.txt` in its
-own Python environment and mount the existing validated BTS weights and metadata
-read-only. Start `uvicorn app:app --host 0.0.0.0 --port 8001` inside its private
-service network and set `ML_SERVICE_URL` on the backend. Do not expose it publicly.
-No Indian flight-level model is installed; unsupported-domain results remain
-explicit. Model training is never run during API/worker startup.
-
-Use Node 24 and Python 3.14.6 (the version in `ml/.python-version`). The model
-service also needs the repository's `backend/data/destination-airports.json`,
-`destination-airport-overrides.json` and `airport-locations.json` at their existing
-relative paths. They provide region and airport-local timezone resolution.
-`SKYSCOUT_MODEL_DIR` may point to a read-only artifact mount; it must contain
-`metadata.json` and the matching `delay-lstm-vN.pt`. Missing or invalid artifacts
-leave the optional service live but not ready, and do not block the Express API.
-Never train a model during an image build or download raw BTS data at startup.
-
-## Host-managed production processes
-
-From the app folder, install and build before changing the running release:
-
-```sh
-npm ci
-npm ci --prefix backend
-VITE_API_URL=/api npm run build
-```
-
-The last command uses POSIX environment syntax; in PowerShell set
-`$env:VITE_API_URL='/api'` before `npm run build`. Vite substitutes this public URL
-at build time; changing the server's environment later does not rewrite a bundle.
-Serve `dist/` using a configured static host/reverse proxy with SPA fallback, or
-use the provided nginx image. Vite's development server and preview server are
-not the production web host. Keep provider keys and database credentials in the
-runtime secret store, never a `VITE_*` variable.
-
-Run the following as separate supervised services, with working directories
-explicitly configured (`backend` for API/worker, `ml` for inference):
-
-```sh
-# backend service environment: NODE_ENV=production, MONITORING_ENABLED=false,
-# MONGODB_URI, HTTPS CLIENT_ORIGINS and other required private values
-npm start
-
-# independent backend worker, same database/provider secrets
-npm run worker
-
-# separate Python environment, with requirements installed beforehand
-python -m uvicorn app:app --host 0.0.0.0 --port 8001
-```
-
-Use an always-on worker role or an external durable scheduler for
-`npm run worker:once`; a browser tab, sleeping web instance or ephemeral scheduled
-timer is insufficient. Use a dedicated database/account for automated checks and
-deny public network access to MongoDB and ML. Container users must set
-`ML_SERVICE_URL` to a reachable private service hostname, not the API container's
-`127.0.0.1`. Compose currently defines web/API/worker only; provision optional ML
-separately when desired.
-
-## Local container preparation
-
-Configure `backend/.env` with production values, then run from the app directory:
-
-```sh
-docker compose build
-docker compose up -d
-```
-
-The web container binds only `127.0.0.1:8080`; place HTTPS ingress in front of it.
-API and worker containers use the existing external MongoDB deployment. The web
-bundle uses `/api` and carries no provider secrets. SPA routes fall back to
-`index.html`; hashed assets are cached, HTML is revalidated, and API requests
-retain their original routes. Pin and review container digests for the actual
-release after building and scanning them in the deployment environment.
-
-Both API and worker receive 20 seconds to stop, exceeding their 15-second bounded
-shutdown deadline. Give host-managed processes at least that grace period as
-well. Do not terminate all worker instances in the middle of a rollout; drain
-active work before replacing them and monitor lease recovery. The worker exposes
-its heartbeat through the API's private operations endpoint rather than an HTTP
-listener. Exactly-once processing is not claimed; lease fencing and unique
-observation/notification identities make retry behavior idempotent.
-
-## Verification before release
-
-```sh
-npm run lint
-npm test
-npm run build
-cd backend
-npm run test:e2e
-node scripts/verify-dashboard-navigation.mjs
-node scripts/verify-concurrency.mjs
-node scripts/verify-model.mjs
-node scripts/verify-weather.mjs
-node scripts/check-secrets.mjs
-node scripts/backfill-quote-timestamps.mjs
-```
-
-The Dashboard navigation suite uses explicitly controlled fare fixtures and real
-local auth/HTTP/MongoDB calls; it does not consume paid provider keys. Chrome is
-required, with `CHROME_PATH` set for non-default installations. Set
-`E2E_API_URL`, `E2E_WEB_URL` and `QA_OUTPUT_DIR` when testing a different local
-stack or preserving a new evidence directory. Never run QA against real users'
-records; the scripts create and remove their own temporary accounts. The
-concurrency/model/weather suites require their named local dependencies, and
-weather calls use a public provider. Run paid-provider scripts only as a bounded,
-separately labeled live smoke check after reviewing current quota.
-
-From `ml` with its virtual environment active, run:
-
-```sh
-python -m pip check
-python -m compileall -q app.py train.py india_support.py
-python -m unittest discover -s . -p 'test_*.py'
-python check_regional_inference.py
-```
-
-The fixture suite validates preprocessing against the existing trainer, feature
-ordering, sequence construction, calibrated outputs, invalid artifacts/requests,
-missing-model responses and HTTP contracts. It never retrains or modifies served
-weights. The last smoke check requires the separately installed evaluated U.S.
-artifact and uses a synthetic schedule; it does not prove a live flight's future
-outcome. Python dependency vulnerabilities are checked in CI with `pip-audit`;
-`pip check` only verifies package compatibility.
-
-The backfill defaults to a dry run. `--apply` fills a missing quote timestamp
-only when the current fare matches the latest actual observation; it changes
-no prices and deletes no history. Inspect the dry-run counts before rollout.
-Existing records with conflicting price/history data require individual review.
-
-The existing Chrome/CDP browser suite is
-`node scripts/verify-fare-repair.mjs`. It uses temporary accounts and real
-provider requests; its interception fixtures are labeled separately. Chrome's
-path must be adapted on non-Windows hosts. Evidence defaults to
-an ignored local QA directory; set `QA_OUTPUT_DIR` to a new run directory to
-preserve earlier captures. It does not query other users' histories unless
-`QA_INCLUDE_EXISTING_HISTORY=true` is explicitly set.
-
-## Health and operations
-
-`GET /health` is liveness and may report degraded dependency state with HTTP 200.
-`GET /readyz` checks required database connectivity and returns 503 when not ready.
-Optional Maps/Gemini/ML failures do not take down the rest of the application.
-`GET /api/operations` is hidden unless `Authorization: Bearer <OPERATIONS_TOKEN>`
-matches the private configured token. It exposes safe provider stage counts,
-failure categories, ML health and the durable monitoring heartbeat. Keep this
-token out of the browser and health-probe logs. Provider counters are cumulative
-while their shared operational record exists; records expire seven days after
-their last update. The worker heartbeat and rate-limit rejection counts are also
-shared through MongoDB.
-
-Public probes (use the actual deployment origin and private ML hostname):
-
-```sh
-curl --fail https://your-skyscout-host.example/health
-curl --fail https://your-skyscout-host.example/readyz
-# On the private service network only:
-curl --fail http://ml-service:8001/health
-curl --fail http://ml-service:8001/readyz
-```
-
-ML `/health` is a 200 liveness response with installed regional versions; `/readyz`
-is 503 when no validated model can serve requests. Express `/readyz` requires
-MongoDB rather than every optional provider. Health and configuration status do
-not establish SerpApi quota, Gemini grounded findings or route correctness.
-Inspect private operations diagnostics through a secure client that injects the
-token from its secret store; avoid putting its value in shell history or logs.
-The application has structured safe operational logs and persisted provider/worker
-diagnostics; no external error-monitoring account or log-alerting destination has
-been configured by this repository.
-
-Alert on database readiness loss, missing/old worker heartbeat, growing overdue
-tracking backlog, lease contention, provider quota/cooldown, repeated request
-failures and HTTP 5xx rates. Decide thresholds from measured traffic and the
-monitoring interval; no unmeasured latency/service-level claim is made.
-
-Research uses per-user throttles, short negative caches and exclusive research
-leases. The Gemini SDK's implicit retries are disabled; one retry on a transient
-503 must pass the shared daily budget again. SerpApi uses bounded retry/backoff,
-Retry-After handling, a configured optional daily budget, four provider slots
-and short response caches. Quota exhaustion never means "no news".
-
-## External release gates
-
-Complete live Maps routing and geographic/time-overlap checks after configuring
-the real Routes credential and billing. Regional/school-event coverage requires
-verified source data beyond the installed national calendars. Grounded report
-storage remains gated by `GEMINI_GROUNDED_STORAGE_AUTHORIZED`; enable it only under
-an agreement permitting that storage. The default Google Search grounding terms
-restrict caching ([official terms](https://ai.google.dev/gemini-api/terms)). An API
-key is not a storage entitlement. No provider credentials, permissions or billing
-were changed during this work.
-
-Also verify the actual host's DNS/TLS, reverse-proxy hop count, Secure cookie
-behavior over HTTPS, same-site/cross-site CORS topology, static SPA deep links,
-container build/scan and shutdown behavior. Docker/Compose and hosted CI must be
-executed in an environment that provides them; checked-in configuration alone
-is not evidence that an image was built or a deployment occurred.
-
-Fare numbers are conditional scenarios, not validated predictions. Actual
-chronological holdouts are reported where suitable observations exist; neither
-synthetic test fixtures nor the US delay model establish Indian fare accuracy.
-
-Post-deployment smoke checks must cover: register/login/logout in a QA account;
-Mumbai autocomplete and a bounded future search; Results â†’ Dashboard â†’ Back;
-tracking/refresh/removal; a worker tick against a QA tracking record; Fare
-Intelligence formula/day controls; unavailable optional providers; owned-record
-denial from a second QA account; mobile and light/dark layout. Separate genuine
-provider responses from deterministic test fixtures in the release evidence.
-
-## CI and release evidence
-
-`.github/workflows/ci.yml` at the repository root runs:
-
-- Locked JavaScript installs, lint, combined backend/frontend-helper unit checks,
-  production bundle and high-severity npm dependency audits.
-- An isolated MongoDB 8 replica set, API and Vite; real HTTP/database QA and the
-  Dashboard browser fixture journey. No paid API credentials are configured.
-- Python 3.14.6 install/compatibility checks, compilation, deterministic unittest
-  inference/data-pipeline contracts and a strict Python dependency audit.
-
-The CI replica set is necessary for tracking transactions and is destroyed with
-the runner; it does not connect to the developer's MongoDB. Evidence artifacts
-retain test screenshots and local service logs. No TypeScript check is configured
-because this application is JavaScript. Live-provider quota/authentication,
-network-specific routing and actual evaluated model weights are separate smoke
-checks, not silently skipped deterministic tests. GitHub execution must be
-reviewed after push; a local test result does not establish a hosted-CI pass.
-
-Rollback individual changed source files from the ignored pre-change archive
-described in Local QA/readiness artifact omitted from public source repository.. Preserve `.env`, the
-existing model artifacts, database records and the user's Git index. Drain active
-workers before changing code; shutdown waits for in-progress work, with a bounded
-deadline and lease recovery if a host forces termination.
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíç­µN‹Z–‹­¦ëeŠw¬ÔŒ•Á±½å¥¹œÑ¡”•á¥ÍÑ¥¹œM­åM½ÕĞ…ÁÁ±¥…Ñ¥½¸()Q¡¥ÌÉ•Á½Í¥Ñ½ÉäÁÉ½Ù¥‘•ÌA$°¥¹‘•Á•¹‘•¹Ğİ½É­•È°ÍÑ…Ñ¥Œµİ•ˆ…¹½ÁÑ¥½¹…°50)½¹Ñ…¥¹•È‘•™¥¹¥Ñ¥½¹Ì¸IÕ¸¥µ…”‰Õ¥±‘Ì°¥µ…”Í…¹Ì…¹¡½ÍĞµÍÁ•¥™¥ŒÍµ½­”)¡•­Ì¥¸Ñ¡”‘•Á±½åµ•¹Ğ•¹Ù¥É½¹µ•¹Ğ‰•™½É”É•±•…Í”¸1½…°E½ÕÑÁÕĞ¥Ì¹½Ğ)¥¹±Õ‘•¥¸Ñ¡”ÁÕ‰±¥ŒÍ½ÕÉ”É•Á½Í¥Ñ½Éä¸()Q¡”…ÁÀÉ•ÅÕ¥É•Ì„É•…¡…‰±”5½¹½É•Á±¥„Í•Ğ½ÈÍ¡…É‘•±ÕÍÑ•È¸½¹™¥É´)½ÕÑ‰½Õ¹9L½Q1L…•ÍÌ…¹Ñ¡”Ñ±…Ì…•ÍÌ±¥ÍĞ™É½´Ñ¡”‘•Á±½åµ•¹Ğ¡½ÍĞì‘¼)¹½Ğ½Á•¸Õ¹É•ÍÑÉ¥Ñ•‘…Ñ…‰…Í”…•ÍÌ™½ÈÁÉ½‘ÕÑ¥½¸¸()½È½¹Ñ…¥¹•É¥é•¥¹™•É•¹”°ÕÍ”è()Í )‘½­•È½µÁ½Í”€µ˜½µÁ½Í”¹å…µ°€µ˜½µÁ½Í”¹µ°¹å…µ°½¹™¥œ)‘½­•È½µÁ½Í”€µ˜½µÁ½Í”¹å…µ°€µ˜½µÁ½Í”¹µ°¹å…µ°‰Õ¥±)‘½­•È½µÁ½Í”€µ˜½µÁ½Í”¹å…µ°€µ˜½µÁ½Í”¹µ°¹å…µ°ÕÀ€µ)€()Q¡”50½Ù•É±…äÁ½¥¹ÑÌA$½İ½É­•ÈÉ•ÅÕ•ÍÑÌ…ĞÑ¡”ÁÉ¥Ù…Ñ”µ°èàÀÀÅ€Í•ÉÙ¥”…¹)µ½Õ¹ÑÌ•Ù…±Õ…Ñ•…ÉÑ¥™…ÑÌÉ•…µ½¹±ä™É½´€‘íM-eM=UQ}5=1}%Hè´¸½µ°½…ÉÑ¥™…ÑÍõ€¸)Q¡”50‰Õ¥±½¹Ñ•áĞ¥ÌÑ¡”…ÁÀÉ½½Ğ‰•…ÕÍ”¥¹™•É•¹”ÕÍ•ÌÑ¡”Í¡…É•…¥ÉÁ½ÉĞ)Ñ¥µ•é½¹”…Ñ…±½œ¸9¼¡•­Á½¥¹Ğ½ÈÑÉ…¥¹¥¹œ‘…Ñ„¥Ì‰…­•¥¹Ñ¼Ñ¡”¥µ…”¸5¥ÍÍ¥¹œ)…ÉÑ¥™…ÑÌ­••À€½É•…‘åé€Õ¹…Ù…¥±…‰±”¸I•Ñ…¥¸½¹”ÍÕÁ•ÉÙ¥Í•¥¹™•É•¹”ÁÉ½•ÍÌÁ•È)…±±½…Ñ•µ½‘•°µµ•µ½Éä‰Õ‘•Ğì¹¼Õ¹µ•…ÍÕÉ•Ñ¡É½Õ¡ÁÕĞ±…¥´¥Ìµ…‘”¸((ŒŒI•ÅÕ¥É•Í•ÉÙ¥•Ì…¹½¹™¥ÕÉ…Ñ¥½¸((´9½‘”€ÈĞìÕÍ”¹Á´¥€¥¸‰½Ñ Ñ¡”…ÁÀ…¹‰…­•¹‘€‘¥É•Ñ½É¥•Ì¸(´É•…¡…‰±”5½¹½É•Á±¥„Í•Ğ½ÈÍ¡…É‘•±ÕÍÑ•È¸QÉ…­¥¹œ°ÅÕ½Ñ”½µµ¥ÑÌ°(€¹½Ñ¥™¥…Ñ¥½¸Á•ÉÍ¥ÍÑ•¹”…¹‘•±•Ñ¥½¸ÕÍ”ÑÉ…¹Í…Ñ¥½¹Ì¸ÍÑ…¹‘…±½¹”5½¹½(€ÁÉ½•ÍÌ‘½•Ì¹½ĞÍ…Ñ¥Í™äÑ¡¥ÌÉ•ÅÕ¥É•µ•¹Ğ¸(´AÉ¥Ù…Ñ”M•ÉÁÁ¤…¹•µ¥¹¤É•‘•¹Ñ¥…±Ì¸M•ĞÁÉ½Ù¥‘•È‰Õ‘•ÑÌÑ¼å½ÕÈ…ÑÕ…°(€Á±…¸ìÑ¡¥ÌÉ•Á½Í¥Ñ½Éä‘½•Ì¹½Ğ…ÍÍ•ÉĞÁÉ½Ù¥‘•ÈÁÉ¥•Ì½È•¹Ñ¥Ñ±•µ•¹ÑÌ¸(´½½±”5…ÁÌI½ÕÑ•ÌA$°…¸•¹…‰±•‰¥±±¥¹œ…½Õ¹Ğ…¹„ÁÉ½Á•É±äÉ•ÍÑÉ¥Ñ•(€Í•ÉÙ•ÈÉ•‘•¹Ñ¥…°™½È•¹Õ¥¹”É½…É½ÕÑ•Ì¸¸A$­•ä™½È±•…ä¥É•Ñ¥½¹Ì(€…±½¹”¥Ì¥¹ÍÕ™™¥¥•¹Ğ¸½¹™¥ÕÉ”==1}5AM}A%}-e€½¸Ñ¡”‰…­•¹¸(´!QQAL¥¹É•ÍÌ…¹•á…Ğ1%9Q}=I%%9M€°™½È•á…µÁ±”(€¡ÑÑÁÌè¼½å½ÕÈµ…ÑÕ…°µ¡½ÍĞ¹•á…µÁ±•€¸AÉ½‘ÕÑ¥½¸ÍÑ…ÉÑÕÀÉ•©•ÑÌ!QQ@½É¥¥¹Ì¸(´MMM%=9}M5}M%Qõ1…á€™½ÈÑ¡”Í…µ”µÍ¥Ñ”İ•ˆ½A$‘•Á±½åµ•¹Ğ¸%˜¥¹Ñ•¹Ñ¥½¹…±±ä(€‘•Á±½å¥¹œ…É½ÍÌÍ¥Ñ•Ì°ÕÍ”9½¹•€İ¥Ñ ÁÉ½‘ÕÑ¥½¸M•ÕÉ”½½­¥•Ì…¹É•Ñ…¥¸(€Ñ¡”•á…Ğ=IL…±±½İ±¥ÍĞ…¹MI¡•…‘•È¸!½ÍĞµ½¹±ä!ÑÑÁ=¹±ä½½­¥•Ì…É”ÕÍ•¸(´M•ĞQIUMQ}AI=ae€Ñ¼Ñ¡”…ÑÕ…°ÑÉÕÍÑ•¡½À½Õ¹Ğ°…¹ÁÉ•Ù•¹Ğ‘¥É•ĞÁÕ‰±¥Œ(€…•ÍÌÑ¼A$É•Á±¥…Ì¸Q¡”ÁÉ½Ù¥‘•¹¥¹àÁÉ½áä½Ù•ÉİÉ¥Ñ•Ì™½Éİ…É‘•%@(€¡•…‘•ÉÌì…‘…ÁĞÑÉÕÍÑ•µ¥¹É•ÍÌ…‘‘É•ÍÌ¡…¹‘±¥¹œÑ¼Ñ¡”É•…°¡½ÍĞÑ½Á½±½ä¸(´M•Ğ5=9%Q=I%9}9	1õ™…±Í•€¥¸!QQ@É•Á±¥…Ì¸IÕ¸¹Á´ÉÕ¸İ½É­•É€¥¸…¸(€…±İ…åÌµ½¸ÁÉ½•ÍÌµ…¹…•‰ä½­•È°ÍåÍÑ•µ½ÈÑ¡”¡½Í•¸¡½ÍĞÌİ½É­•ÈÉ½±”¸(€%ĞÉ•¡•­Ì‘Õ”É•½É‘Ì…ÁÁÉ½á¥µ…Ñ•±ä•Ù•ÉäÍ¥à¡½ÕÉÌ…¹É•½Ù•ÉÌ•áÁ¥É•(€±•…Í•Ì…™Ñ•ÈÉ•ÍÑ…ÉĞ¸¼¹½ĞÉÕ¸Ñ¡¥ÌÑ¥µ•È¥¸„Í±••Á¥¹œÍ•ÉÙ•É±•ÍÌÍ•ÉÙ¥”¸()½È…¸•áÑ•É¹…°Í¡•‘Õ±•È°ÉÕ¸‰…­•¹€˜˜¹Á´ÉÕ¸İ½É­•Èé½¹•€½¹”Á•È)µ¥¹ÕÑ”¸… ¥¹Ù½…Ñ¥½¸Ñ…­•Ì…Ğµ½ÍĞ™½ÕÈ‘Õ”©½‰ÌìÁÉ½Ù¥Í¥½¸•¹½Õ ¥¹Ù½…Ñ¥½¹Ì)½Èİ½É­•È¥¹ÍÑ…¹•Ì™½ÈÑ¡”…ÑÕ…°‰…­±½œ¸½¹ÕÉÉ•¹Ğ¥¹ÍÑ…¹•Ì±…¥´•á±ÕÍ¥Ù”°)½İ¹•Èµ™•¹•‘…Ñ…‰…Í”±•…Í•Ì¸A•Éµ…¹•¹ĞÅÕ•Éä½½¹™¥ÕÉ…Ñ¥½¸•ÉÉ½ÉÌ½ÈÍ¥à)½¹Í•ÕÑ¥Ù”™…¥±ÕÉ•ÌÍÑ½À„ÑÉ…¬¥¸Õ¹É•Í½±Ù•‘€Õ¹Ñ¥°É•Ù¥•İ•…¹É•ÍÕµ•¸((ŒŒ1¥µ¥Ñ•™É•”I•¹‘•È‘•µ¼()Q¡”É•Á½Í¥Ñ½ÉäµÉ½½ĞÉ•¹‘•È¹å…µ±€‘•™¥¹•Ì½¹”™É•”9½‘”İ•ˆÍ•ÉÙ¥”¥¸M¥¹…Á½É”¸)%Ğ‰Õ¥±‘ÌÑ¡”Y¥Ñ”…ÁÀ°Í•ÉÙ•Ì¥ÑÌ™¥±•Ì™É½´áÁÉ•ÍÌ…ĞÑ¡”Í…µ”½É¥¥¸…ÌÑ¡”)A$°…¹ÕÍ•ÌI•¹‘•ÈÌI9I}aQI91}UI1€™½ÈÑ¡”ÁÉ½‘ÕÑ¥½¸½É¥¥¸…±±½İ±¥ÍĞ¸)Q¡”Í…µ”µ½É¥¥¸±…å½ÕĞ­••ÁÌÑ¡”•á¥ÍÑ¥¹œ¡½ÍĞµ½¹±äÍ•ÍÍ¥½¸½½­¥”½¸Ñ¡”‰É½İÍ•ÈÌ)Í¥Ñ”¸%ĞÕÍ•ÌÑ¡”•á¥ÍÑ¥¹œÑ±…Ì‘…Ñ…‰…Í”ì¥Ğ‘½•Ì¹½ĞÉ•…Ñ”½Èµ¥É…Ñ”„‘…Ñ…‰…Í”¸()Q¡”	±Õ•ÁÉ¥¹ĞÁÉ½µÁÑÌ™½È5=9=	}UI%€°MIAA%}A%}-e€…¹5%9%}A%}-e€¥¸)I•¹‘•ÈÌÍ•É•Ğ½¹™¥ÕÉ…Ñ¥½¸¸¹Ñ•ÈÑ¡½Í”Ù…±Õ•Ì¥¸I•¹‘•ÈÌ‘…Í¡‰½…Éì¹•Ù•È)½µµ¥ĞÑ¡•´Ñ¼É•¹‘•È¹å…µ±€½È€¹•¹Ø¹•á…µÁ±•€¸==1}5AM}A%}-e€¥Ì½ÁÑ¥½¹…°)™½ÈÍÑ…ÉÑÕÀ‰ÕĞÉ•ÅÕ¥É•™½È•¹Õ¥¹”I½ÕÑ•ÌA$‘…Ñ„¸=AIQ%=9M}Q=-9€¥Ì)•¹•É…Ñ•‰äI•¹‘•È¸()=¸Ñ¡¥Ì™É•”Á±…¸Ñ¡”µ½¹¥Ñ½É¥¹œ±½½ÀÉÕ¹Ì¥¹Í¥‘”Ñ¡”İ•ˆÁÉ½•ÍÌ¸I•¹‘•ÈÍÁ¥¹Ì„)™É•”İ•ˆÍ•ÉÙ¥”‘½İ¸…™Ñ•È€ÄÔµ¥¹ÕÑ•Ìİ¥Ñ¡½ÕĞ¥¹‰½Õ¹ÑÉ…™™¥Œ…¹Ñ…­•Ì…‰½ÕĞ„)µ¥¹ÕÑ”Ñ¼İ…­”¥Ğ™½ÈÑ¡”¹•áĞÉ•ÅÕ•ÍĞ¸AÉ¥”¡•­ÌÁ…ÕÍ”İ¡¥±”¥Ğ¥Ì…Í±••À…¹)É•ÍÕµ”…™Ñ•ÈÍÑ…ÉÑÕÀì‰…­É½Õ¹İ½É­•ÉÌ…¹É½¸©½‰Ì‘¼¹½Ğ¡…Ù”™É•”¥¹ÍÑ…¹•Ì¸)É•”Í•ÉÙ¥”™¥±•Ì…É”•Á¡•µ•É…°°Í¼‘ÕÉ…‰±”ÕÍ•È°¥Ñ¥¹•É…Éä°¡¥ÍÑ½Éä…¹)¹½Ñ¥™¥…Ñ¥½¸‘…Ñ„µÕÍĞÉ•µ…¥¸¥¸Ñ±…Ì¸Q¡¥Ì‘•Á±½åµ•¹Ğ¥Ì„‘•µ¼°¹½Ğ…¸)…±İ…åÌµ½¸µ½¹¥Ñ½É¥¹œ½ÈÕÁÑ¥µ”Õ…É…¹Ñ•”¸Q¡”½ÁÑ¥½¹…°50Í•ÉÙ¥”¥Ì¹½Ğ¥¹±Õ‘•)‰•…ÕÍ”Ñ¡”Ù…±¥‘…Ñ•µ½‘•°…ÉÑ¥™…ÑÌ…É”¹½ĞÁÕ‰±¥Í¡•¥¸Ñ¡”É•Á½Í¥Ñ½Éä¸()Q¡”50Í•ÉÙ¥”¥Ì½ÁÑ¥½¹…°…¹¥¹‘•Á•¹‘•¹Ğ¸%¹ÍÑ…±°µ°½É•ÅÕ¥É•µ•¹ÑÌ¹ÑáÑ€¥¸¥ÑÌ)½İ¸AåÑ¡½¸•¹Ù¥É½¹µ•¹Ğ…¹µ½Õ¹ĞÑ¡”•á¥ÍÑ¥¹œÙ…±¥‘…Ñ•	QLİ•¥¡ÑÌ…¹µ•Ñ…‘…Ñ„)É•…µ½¹±ä¸MÑ…ÉĞÕÙ¥½É¸…ÁÀé…ÁÀ€´µ¡½ÍĞ€À¸À¸À¸À€´µÁ½ÉĞ€àÀÀÅ€¥¹Í¥‘”¥ÑÌÁÉ¥Ù…Ñ”)Í•ÉÙ¥”¹•Ñİ½É¬…¹Í•Ğ51}MIY%}UI1€½¸Ñ¡”‰…­•¹¸¼¹½Ğ•áÁ½Í”¥ĞÁÕ‰±¥±ä¸)9¼%¹‘¥…¸™±¥¡Ğµ±•Ù•°µ½‘•°¥Ì¥¹ÍÑ…±±•ìÕ¹ÍÕÁÁ½ÉÑ•µ‘½µ…¥¸É•ÍÕ±ÑÌÉ•µ…¥¸)•áÁ±¥¥Ğ¸5½‘•°ÑÉ…¥¹¥¹œ¥Ì¹•Ù•ÈÉÕ¸‘ÕÉ¥¹œA$½İ½É­•ÈÍÑ…ÉÑÕÀ¸()UÍ”9½‘”€ÈĞ…¹AåÑ¡½¸€Ì¸ÄĞ¸Ø€¡Ñ¡”Ù•ÉÍ¥½¸¥¸µ°¼¹ÁåÑ¡½¸µÙ•ÉÍ¥½¹€¤¸Q¡”µ½‘•°)Í•ÉÙ¥”…±Í¼¹••‘ÌÑ¡”É•Á½Í¥Ñ½ÉäÌ‰…­•¹½‘…Ñ„½‘•ÍÑ¥¹…Ñ¥½¸µ…¥ÉÁ½ÉÑÌ¹©Í½¹€°)‘•ÍÑ¥¹…Ñ¥½¸µ…¥ÉÁ½ÉĞµ½Ù•ÉÉ¥‘•Ì¹©Í½¹€…¹…¥ÉÁ½ÉĞµ±½…Ñ¥½¹Ì¹©Í½¹€…ĞÑ¡•¥È•á¥ÍÑ¥¹œ)É•±…Ñ¥Ù”Á…Ñ¡Ì¸Q¡•äÁÉ½Ù¥‘”É•¥½¸…¹…¥ÉÁ½ÉĞµ±½…°Ñ¥µ•é½¹”É•Í½±ÕÑ¥½¸¸)M-eM=UQ}5=1}%I€µ…äÁ½¥¹ĞÑ¼„É•…µ½¹±ä…ÉÑ¥™…Ğµ½Õ¹Ğì¥ĞµÕÍĞ½¹Ñ…¥¸)µ•Ñ…‘…Ñ„¹©Í½¹€…¹Ñ¡”µ…Ñ¡¥¹œ‘•±…äµ±ÍÑ´µÙ8¹ÁÑ€¸5¥ÍÍ¥¹œ½È¥¹Ù…±¥…ÉÑ¥™…ÑÌ)±•…Ù”Ñ¡”½ÁÑ¥½¹…°Í•ÉÙ¥”±¥Ù”‰ÕĞ¹½ĞÉ•…‘ä°…¹‘¼¹½Ğ‰±½¬Ñ¡”áÁÉ•ÍÌA$¸)9•Ù•ÈÑÉ…¥¸„µ½‘•°‘ÕÉ¥¹œ…¸¥µ…”‰Õ¥±½È‘½İ¹±½…É…Ü	QL‘…Ñ„…ĞÍÑ…ÉÑÕÀ¸((ŒŒ!½ÍĞµµ…¹…•ÁÉ½‘ÕÑ¥½¸ÁÉ½•ÍÍ•Ì()É½´Ñ¡”…ÁÀ™½±‘•È°¥¹ÍÑ…±°…¹‰Õ¥±‰•™½É”¡…¹¥¹œÑ¡”ÉÕ¹¹¥¹œÉ•±•…Í”è()Í )¹Á´¤)¹Á´¤€´µÁÉ•™¥à‰…­•¹)Y%Q}A%}UI0ô½…Á¤¹Á´ÉÕ¸‰Õ¥±)€()Q¡”±…ÍĞ½µµ…¹ÕÍ•ÌA=M%`•¹Ù¥É½¹µ•¹ĞÍå¹Ñ…àì¥¸A½İ•ÉM¡•±°Í•Ğ)€‘•¹ØéY%Q}A%}UI0ôœ½…Á¤€‰•™½É”¹Á´ÉÕ¸‰Õ¥±‘€¸Y¥Ñ”ÍÕ‰ÍÑ¥ÑÕÑ•ÌÑ¡¥ÌÁÕ‰±¥ŒUI0)…Ğ‰Õ¥±Ñ¥µ”ì¡…¹¥¹œÑ¡”Í•ÉÙ•ÈÌ•¹Ù¥É½¹µ•¹Ğ±…Ñ•È‘½•Ì¹½ĞÉ•İÉ¥Ñ”„‰Õ¹‘±”¸)M•ÉÙ”‘¥ÍĞ½€ÕÍ¥¹œ„½¹™¥ÕÉ•ÍÑ…Ñ¥Œ¡½ÍĞ½É•Ù•ÉÍ”ÁÉ½áäİ¥Ñ MA™…±±‰…¬°½È)ÕÍ”Ñ¡”ÁÉ½Ù¥‘•¹¥¹à¥µ…”¸Y¥Ñ”Ì‘•Ù•±½Áµ•¹ĞÍ•ÉÙ•È…¹ÁÉ•Ù¥•ÜÍ•ÉÙ•È…É”)¹½ĞÑ¡”ÁÉ½‘ÕÑ¥½¸İ•ˆ¡½ÍĞ¸-••ÀÁÉ½Ù¥‘•È­•åÌ…¹‘…Ñ…‰…Í”É•‘•¹Ñ¥…±Ì¥¸Ñ¡”)ÉÕ¹Ñ¥µ”Í•É•ĞÍÑ½É”°¹•Ù•È„Y%Q|©€Ù…É¥…‰±”¸()IÕ¸Ñ¡”™½±±½İ¥¹œ…ÌÍ•Á…É…Ñ”ÍÕÁ•ÉÙ¥Í•Í•ÉÙ¥•Ì°İ¥Ñ İ½É­¥¹œ‘¥É•Ñ½É¥•Ì)•áÁ±¥¥Ñ±ä½¹™¥ÕÉ•€¡‰…­•¹‘€™½ÈA$½İ½É­•È°µ±€™½È¥¹™•É•¹”¤è()Í (Œ‰…­•¹Í•ÉÙ¥”•¹Ù¥É½¹µ•¹Ğè9=}9XõÁÉ½‘ÕÑ¥½¸°5=9%Q=I%9}9	1õ™…±Í”°(Œ5=9=	}UI$°!QQAL1%9Q}=I%%9L…¹½Ñ¡•ÈÉ•ÅÕ¥É•ÁÉ¥Ù…Ñ”Ù…±Õ•Ì)¹Á´ÍÑ…ÉĞ((Œ¥¹‘•Á•¹‘•¹Ğ‰…­•¹İ½É­•È°Í…µ”‘…Ñ…‰…Í”½ÁÉ½Ù¥‘•ÈÍ•É•ÑÌ)¹Á´ÉÕ¸İ½É­•È((ŒÍ•Á…É…Ñ”AåÑ¡½¸•¹Ù¥É½¹µ•¹Ğ°İ¥Ñ É•ÅÕ¥É•µ•¹ÑÌ¥¹ÍÑ…±±•‰•™½É•¡…¹)ÁåÑ¡½¸€µ´ÕÙ¥½É¸…ÁÀé…ÁÀ€´µ¡½ÍĞ€À¸À¸À¸À€´µÁ½ÉĞ€àÀÀÄ)€()UÍ”…¸…±İ…åÌµ½¸İ½É­•ÈÉ½±”½È…¸•áÑ•É¹…°‘ÕÉ…‰±”Í¡•‘Õ±•È™½È)¹Á´ÉÕ¸İ½É­•Èé½¹•€ì„‰É½İÍ•ÈÑ…ˆ°Í±••Á¥¹œİ•ˆ¥¹ÍÑ…¹”½È•Á¡•µ•É…°Í¡•‘Õ±•)Ñ¥µ•È¥Ì¥¹ÍÕ™™¥¥•¹Ğ¸UÍ”„‘•‘¥…Ñ•‘…Ñ…‰…Í”½…½Õ¹Ğ™½È…ÕÑ½µ…Ñ•¡•­Ì…¹)‘•¹äÁÕ‰±¥Œ¹•Ñİ½É¬…•ÍÌÑ¼5½¹½…¹50¸½¹Ñ…¥¹•ÈÕÍ•ÉÌµÕÍĞÍ•Ğ)51}MIY%}UI1€Ñ¼„É•…¡…‰±”ÁÉ¥Ù…Ñ”Í•ÉÙ¥”¡½ÍÑ¹…µ”°¹½ĞÑ¡”A$½¹Ñ…¥¹•ÈÌ)€ÄÈÜ¸À¸À¸Å€¸½µÁ½Í”ÕÉÉ•¹Ñ±ä‘•™¥¹•Ìİ•ˆ½A$½İ½É­•È½¹±äìÁÉ½Ù¥Í¥½¸½ÁÑ¥½¹…°50)Í•Á…É…Ñ•±äİ¡•¸‘•Í¥É•¸((ŒŒ1½…°½¹Ñ…¥¹•ÈÁÉ•Á‡­µ¶‰ËkºwµçM•ÉÌœ)É•½É‘ÌìÑ¡”ÍÉ¥ÁÑÌÉ•…Ñ”…¹É•µ½Ù”Ñ¡•¥È½İ¸Ñ•µÁ½É…Éä…½Õ¹ÑÌ¸Q¡”)½¹ÕÉÉ•¹ä½µ½‘•°½İ•…Ñ¡•ÈÍÕ¥Ñ•ÌÉ•ÅÕ¥É”Ñ¡•¥È¹…µ•±½…°‘•Á•¹‘•¹¥•Ì°…¹)İ•…Ñ¡•È…±±ÌÕÍ”„ÁÕ‰±¥ŒÁÉ½Ù¥‘•È¸IÕ¸Á…¥µÁÉ½Ù¥‘•ÈÍÉ¥ÁÑÌ½¹±ä…Ì„‰½Õ¹‘•°)Í•Á…É…Ñ•±ä±…‰•±•±¥Ù”Íµ½­”¡•¬…™Ñ•ÈÉ•Ù¥•İ¥¹œÕÉÉ•¹ĞÅÕ½Ñ„¸()É½´µ±€İ¥Ñ ¥ÑÌÙ¥ÉÑÕ…°•¹Ù¥É½¹µ•¹Ğ…Ñ¥Ù”°ÉÕ¸è()Í )ÁåÑ¡½¸€µ´Á¥À¡•¬)ÁåÑ¡½¸€µ´½µÁ¥±•…±°€µÄ…ÁÀ¹ÁäÑÉ…¥¸¹Áä¥¹‘¥…}ÍÕÁÁ½ÉĞ¹Áä)ÁåÑ¡½¸€µ´Õ¹¥ÑÑ•ÍĞ‘¥Í½Ù•È€µÌ€¸€µÀ€Ñ•ÍÑ|¨¹Áäœ)ÁåÑ¡½¸¡•­}É•¥½¹…±}¥¹™•É•¹”¹Áä)€()Q¡”™¥áÑÕÉ”ÍÕ¥Ñ”Ù…±¥‘…Ñ•ÌÁÉ•ÁÉ½•ÍÍ¥¹œ……¥¹ÍĞÑ¡”•á¥ÍÑ¥¹œÑÉ…¥¹•È°™•…ÑÕÉ”)½É‘•É¥¹œ°Í•ÅÕ•¹”½¹ÍÑÉÕÑ¥½¸°…±¥‰É…Ñ•½ÕÑÁÕÑÌ°¥¹Ù…±¥…ÉÑ¥™…ÑÌ½É•ÅÕ•ÍÑÌ°)µ¥ÍÍ¥¹œµµ½‘•°É•ÍÁ½¹Í•Ì…¹!QQ@½¹ÑÉ…ÑÌ¸%Ğ¹•Ù•ÈÉ•ÑÉ…¥¹Ì½Èµ½‘¥™¥•ÌÍ•ÉÙ•)İ•¥¡ÑÌ¸Q¡”±…ÍĞÍµ½­”¡•¬É•ÅÕ¥É•ÌÑ¡”Í•Á…É…Ñ•±ä¥¹ÍÑ…±±••Ù…±Õ…Ñ•T¹L¸)…ÉÑ¥™…Ğ…¹ÕÍ•Ì„Íå¹Ñ¡•Ñ¥ŒÍ¡•‘Õ±”ì¥Ğ‘½•Ì¹½ĞÁÉ½Ù”„±¥Ù”™±¥¡ĞÌ™ÕÑÕÉ”)½ÕÑ½µ”¸AåÑ¡½¸‘•Á•¹‘•¹äÙÕ±¹•É…‰¥±¥Ñ¥•Ì…É”¡•­•¥¸$İ¥Ñ Á¥Àµ…Õ‘¥Ñ€ì)Á¥À¡•­€½¹±äÙ•É¥™¥•ÌÁ…­…”½µÁ…Ñ¥‰¥±¥Ñä¸()Q¡”‰…­™¥±°‘•™…Õ±ÑÌÑ¼„‘ÉäÉÕ¸¸€´µ…ÁÁ±å€™¥±±Ì„µ¥ÍÍ¥¹œÅÕ½Ñ”Ñ¥µ•ÍÑ…µÀ)½¹±äİ¡•¸Ñ¡”ÕÉÉ•¹Ğ™…É”µ…Ñ¡•ÌÑ¡”±…Ñ•ÍĞ…ÑÕ…°½‰Í•ÉÙ…Ñ¥½¸ì¥Ğ¡…¹•Ì)¹¼ÁÉ¥•Ì…¹‘•±•Ñ•Ì¹¼¡¥ÍÑ½Éä¸%¹ÍÁ•ĞÑ¡”‘ÉäµÉÕ¸½Õ¹ÑÌ‰•™½É”É½±±½ÕĞ¸)á¥ÍÑ¥¹œÉ•½É‘Ìİ¥Ñ ½¹™±¥Ñ¥¹œÁÉ¥”½¡¥ÍÑ½Éä‘…Ñ„É•ÅÕ¥É”¥¹‘¥Ù¥‘Õ…°É•Ù¥•Ü¸()Q¡”•á¥ÍÑ¥¹œ¡É½µ”½@‰É½İÍ•ÈÍÕ¥Ñ”¥Ì)¹½‘”ÍÉ¥ÁÑÌ½Ù•É¥™äµ™…É”µÉ•Á…¥È¹µ©Í€¸%ĞÕÍ•ÌÑ•µÁ½É…Éä…½Õ¹ÑÌ…¹É•…°)ÁÉ½Ù¥‘•ÈÉ•ÅÕ•ÍÑÌì¥ÑÌ¥¹Ñ•É•ÁÑ¥½¸™¥áÑÕÉ•Ì…É”±…‰•±•Í•Á…É…Ñ•±ä¸¡É½µ”Ì)Á…Ñ µÕÍĞ‰”…‘…ÁÑ•½¸¹½¸µ]¥¹‘½İÌ¡½ÍÑÌ¸Ù¥‘•¹”‘•™…Õ±ÑÌÑ¼)…¸¥¹½É•±½…°E‘¥É•Ñ½ÉäìÍ•ĞE}=UQAUQ}%I€Ñ¼„¹•ÜÉÕ¸‘¥É•Ñ½ÉäÑ¼)ÁÉ•Í•ÉÙ”•…É±¥•È…ÁÑÕÉ•Ì¸%Ğ‘½•Ì¹½ĞÅÕ•Éä½Ñ¡•ÈÕÍ•ÉÌœ¡¥ÍÑ½É¥•ÌÕ¹±•ÍÌ)E}%91U}a%MQ%9}!%MQ=IdõÑÉÕ•€¥Ì•áÁ±¥¥Ñ±äÍ•Ğ¸((ŒŒ!•…±Ñ …¹½Á•É…Ñ¥½¹Ì()P€½¡•…±Ñ¡€¥Ì±¥Ù•¹•ÍÌ…¹µ…äÉ•Á½ÉĞ‘•É…‘•‘•Á•¹‘•¹äÍÑ…Ñ”İ¥Ñ !QQ@€ÈÀÀ¸)P€½É•…‘åé€¡•­ÌÉ•ÅÕ¥É•‘…Ñ…‰…Í”½¹¹•Ñ¥Ù¥Ñä…¹É•ÑÕÉ¹Ì€ÔÀÌİ¡•¸¹½ĞÉ•…‘ä¸)=ÁÑ¥½¹…°5…ÁÌ½•µ¥¹¤½50™…¥±ÕÉ•Ì‘¼¹½ĞÑ…­”‘½İ¸Ñ¡”É•ÍĞ½˜Ñ¡”…ÁÁ±¥…Ñ¥½¸¸)P€½…Á¤½½Á•É…Ñ¥½¹Í€¥Ì¡¥‘‘•¸Õ¹±•ÍÌÕÑ¡½É¥é…Ñ¥½¸è	•…É•È€ñ=AIQ%=9M}Q=-8ù€)µ…Ñ¡•ÌÑ¡”ÁÉ¥Ù…Ñ”½¹™¥ÕÉ•Ñ½­•¸¸%Ğ•áÁ½Í•ÌÍ…™”ÁÉ½Ù¥‘•ÈÍÑ…”½Õ¹ÑÌ°)™…¥±ÕÉ”…Ñ•½É¥•Ì°50¡•…±Ñ …¹Ñ¡”‘ÕÉ…‰±”µ½¹¥Ñ½É¥¹œ¡•…ÉÑ‰•…Ğ¸-••ÀÑ¡¥Ì)Ñ½­•¸½ÕĞ½˜Ñ¡”‰É½İÍ•È…¹¡•…±Ñ µÁÉ½‰”±½Ì¸AÉ½Ù¥‘•È½Õ¹Ñ•ÉÌ…É”ÕµÕ±…Ñ¥Ù”)İ¡¥±”Ñ¡•¥ÈÍ¡…É•½Á•É…Ñ¥½¹…°É•½É•á¥ÍÑÌìÉ•½É‘Ì•áÁ¥É”Í•Ù•¸‘…åÌ…™Ñ•È)Ñ¡•¥È±…ÍĞÕÁ‘…Ñ”¸Q¡”İ½É­•È¡•…ÉÑ‰•…Ğ…¹É…Ñ”µ±¥µ¥ĞÉ•©•Ñ¥½¸½Õ¹ÑÌ…É”…±Í¼)Í¡…É•Ñ¡É½Õ 5½¹½¸()AÕ‰±¥ŒÁÉ½‰•Ì€¡ÕÍ”Ñ¡”…ÑÕ…°‘•Á±½åµ•¹Ğ½É¥¥¸…¹ÁÉ¥Ù…Ñ”50¡½ÍÑ¹…µ”¤è()Í )ÕÉ°€´µ™…¥°¡ÑÑÁÌè¼½å½ÕÈµÍ­åÍ½ÕĞµ¡½ÍĞ¹•á…µÁ±”½¡•…±Ñ )ÕÉ°€´µ™…¥°¡ÑÑÁÌè¼½å½ÕÈµÍ­åÍ½ÕĞµ¡½ÍĞ¹•á…µÁ±”½É•…‘åè(Œ=¸Ñ¡”ÁÉ¥Ù…Ñ”Í•ÉÙ¥”¹•Ñİ½É¬½¹±äè)ÕÉ°€´µ™…¥°¡ÑÑÀè¼½µ°µÍ•ÉÙ¥”èàÀÀÄ½¡•…±Ñ )ÕÉ°€´µ™…¥°¡ÑÑÀè¼½µ°µÍ•ÉÙ¥”èàÀÀÄ½É•…‘åè)€()50€½¡•…±Ñ¡€¥Ì„€ÈÀÀ±¥Ù•¹•ÍÌÉ•ÍÁ½¹Í”İ¥Ñ ¥¹ÍÑ…±±•É•¥½¹…°Ù•ÉÍ¥½¹Ìì€½É•…‘åé€)¥Ì€ÔÀÌİ¡•¸¹¼Ù…±¥‘…Ñ•µ½‘•°…¸Í•ÉÙ”É•ÅÕ•ÍÑÌ¸áÁÉ•ÍÌ€½É•…‘åé€É•ÅÕ¥É•Ì)5½¹½É…Ñ¡•ÈÑ¡…¸•Ù•Éä½ÁÑ¥½¹…°ÁÉ½Ù¥‘•È¸!•…±Ñ …¹½¹™¥ÕÉ…Ñ¥½¸ÍÑ…ÑÕÌ‘¼)¹½Ğ•ÍÑ…‰±¥Í M•ÉÁÁ¤ÅÕ½Ñ„°•µ¥¹¤É½Õ¹‘•™¥¹‘¥¹Ì½ÈÉ½ÕÑ”½ÉÉ•Ñ¹•ÍÌ¸)%¹ÍÁ•ĞÁÉ¥Ù…Ñ”½Á•É…Ñ¥½¹Ì‘¥…¹½ÍÑ¥ÌÑ¡É½Õ „Í•ÕÉ”±¥•¹ĞÑ¡…Ğ¥¹©•ÑÌÑ¡”)Ñ½­•¸™É½´¥ÑÌÍ•É•ĞÍÑ½É”ì…Ù½¥ÁÕÑÑ¥¹œ¥ÑÌÙ…±Õ”¥¸Í¡•±°¡¥ÍÑ½Éä½È±½Ì¸)Q¡”…ÁÁ±¥…Ñ¥½¸¡…ÌÍÑÉÕÑÕÉ•Í…™”½Á•É…Ñ¥½¹…°±½Ì…¹Á•ÉÍ¥ÍÑ•ÁÉ½Ù¥‘•È½İ½É­•È)‘¥…¹½ÍÑ¥Ìì¹¼•áÑ•É¹…°•ÉÉ½Èµµ½¹¥Ñ½É¥¹œ…½Õ¹Ğ½È±½œµ…±•ÉÑ¥¹œ‘•ÍÑ¥¹…Ñ¥½¸¡…Ì)‰••¸½¹™¥ÕÉ•‰äÑ¡¥ÌÉ•Á½Í¥Ñ½Éä¸()±•ÉĞ½¸‘…Ñ…‰…Í”É•…‘¥¹•ÍÌ±½ÍÌ°µ¥ÍÍ¥¹œ½½±İ½É­•È¡•…ÉÑ‰•…Ğ°É½İ¥¹œ½Ù•É‘Õ”)ÑÉ…­¥¹œ‰…­±½œ°±•…Í”½¹Ñ•¹Ñ¥½¸°ÁÉ½Ù¥‘•ÈÅÕ½Ñ„½½½±‘½İ¸°É•Á•…Ñ•É•ÅÕ•ÍĞ)™…¥±ÕÉ•Ì…¹!QQ@€ÕáàÉ…Ñ•Ì¸•¥‘”Ñ¡É•Í¡½±‘Ì™É½´µ•…ÍÕÉ•ÑÉ…™™¥Œ…¹Ñ¡”)µ½¹¥Ñ½É¥¹œ¥¹Ñ•ÉÙ…°ì¹¼Õ¹µ•…ÍÕÉ•±…Ñ•¹ä½Í•ÉÙ¥”µ±•Ù•°±…¥´¥Ìµ…‘”¸()I•Í•…É ÕÍ•ÌÁ•ÈµÕÍ•ÈÑ¡É½ÑÑ±•Ì°Í¡½ÉĞ¹•…Ñ¥Ù”…¡•Ì…¹•á±ÕÍ¥Ù”É•Í•…É )±•…Í•Ì¸Q¡”•µ¥¹¤M,Ì¥µÁ±¥¥ĞÉ•ÑÉ¥•Ì…É”‘¥Í…‰±•ì½¹”É•ÑÉä½¸„ÑÉ…¹Í¥•¹Ğ(ÔÀÌµÕÍĞÁ…ÍÌÑ¡”Í¡…É•‘…¥±ä‰Õ‘•Ğ……¥¸¸M•ÉÁÁ¤ÕÍ•Ì‰½Õ¹‘•É•ÑÉä½‰…­½™˜°)I•ÑÉäµ™Ñ•È¡…¹‘±¥¹œ°„½¹™¥ÕÉ•½ÁÑ¥½¹…°‘…¥±ä‰Õ‘•Ğ°™½ÕÈÁÉ½Ù¥‘•ÈÍ±½ÑÌ)…¹Í¡½ÉĞÉ•ÍÁ½¹Í”…¡•Ì¸EÕ½Ñ„•á¡…ÕÍÑ¥½¸¹•Ù•Èµ•…¹Ì€‰¹¼¹•İÌˆ¸((ŒŒáÑ•É¹…°É•±•…Í”…Ñ•Ì()½µÁ±•Ñ”±¥Ù”5…ÁÌÉ½ÕÑ¥¹œ…¹•½É…Á¡¥Œ½Ñ¥µ”µ½Ù•É±…À¡•­Ì…™Ñ•È½¹™¥ÕÉ¥¹œ)Ñ¡”É•…°I½ÕÑ•ÌÉ•‘•¹Ñ¥…°…¹‰¥±±¥¹œ¸I•¥½¹…°½Í¡½½°µ•Ù•¹Ğ½Ù•É…”É•ÅÕ¥É•Ì)Ù•É¥™¥•Í½ÕÉ”‘…Ñ„‰•å½¹Ñ¡”¥¹ÍÑ…±±•¹…Ñ¥½¹…°…±•¹‘…ÉÌ¸É½Õ¹‘•É•Á½ÉĞ)ÍÑ½É…”É•µ…¥¹Ì…Ñ•‰ä5%9%}I=U9}MQ=I}UQ!=I%i€ì•¹…‰±”¥Ğ½¹±äÕ¹‘•È)…¸…É••µ•¹ĞÁ•Éµ¥ÑÑ¥¹œÑ¡…ĞÍÑ½É…”¸Q¡”‘•™…Õ±Ğ½½±”M•…É É½Õ¹‘¥¹œÑ•ÉµÌ)É•ÍÑÉ¥Ğ…¡¥¹œ€¡m½™™¥¥…°Ñ•ÉµÍt¡¡ÑÑÁÌè¼½…¤¹½½±”¹‘•Ø½•µ¥¹¤µ…Á¤½Ñ•ÉµÌ¤¤¸¸A$)­•ä¥Ì¹½Ğ„ÍÑ½É…”•¹Ñ¥Ñ±•µ•¹Ğ¸9¼ÁÉ½Ù¥‘•ÈÉ•‘•¹Ñ¥…±Ì°Á•Éµ¥ÍÍ¥½¹Ì½È‰¥±±¥¹œ)İ•É”¡…¹•‘ÕÉ¥¹œÑ¡¥Ìİ½É¬¸()±Í¼Ù•É¥™äÑ¡”…ÑÕ…°¡½ÍĞÌ9L½Q1L°É•Ù•ÉÍ”µÁÉ½áä¡½À½Õ¹Ğ°M•ÕÉ”½½­¥”)‰•¡…Ù¥½È½Ù•È!QQAL°Í…µ”µÍ¥Ñ”½É½ÍÌµÍ¥Ñ”=ILÑ½Á½±½ä°ÍÑ…Ñ¥ŒMA‘••À±¥¹­Ì°)½¹Ñ…¥¹•È‰Õ¥±½Í…¸…¹Í¡ÕÑ‘½İ¸‰•¡…Ù¥½È¸½­•È½½µÁ½Í”…¹¡½ÍÑ•$µÕÍĞ‰”)•á•ÕÑ•¥¸…¸•¹Ù¥É½¹µ•¹ĞÑ¡…ĞÁÉ½Ù¥‘•ÌÑ¡•´ì¡•­•µ¥¸½¹™¥ÕÉ…Ñ¥½¸…±½¹”)¥Ì¹½Ğ•Ù¥‘•¹”Ñ¡…Ğ…¸¥µ…”İ…Ì‰Õ¥±Ğ½È„‘•Á±½åµ•¹Ğ½ÕÉÉ•¸()…É”¹Õµ‰•ÉÌ…É”½¹‘¥Ñ¥½¹…°Í•¹…É¥½Ì°¹½ĞÙ…±¥‘…Ñ•ÁÉ•‘¥Ñ¥½¹Ì¸ÑÕ…°)¡É½¹½±½¥…°¡½±‘½ÕÑÌ…É”É•Á½ÉÑ•İ¡•É”ÍÕ¥Ñ…‰±”½‰Í•ÉÙ…Ñ¥½¹Ì•á¥ÍĞì¹•¥Ñ¡•È)Íå¹Ñ¡•Ñ¥ŒÑ•ÍĞ™¥áÑÕÉ•Ì¹½ÈÑ¡”UL‘•±…äµ½‘•°•ÍÑ…‰±¥Í %¹‘¥…¸™…É”…ÕÉ…ä¸()A½ÍĞµ‘•Á±½åµ•¹ĞÍµ½­”¡•­ÌµÕÍĞ½Ù•ÈèÉ•¥ÍÑ•È½±½¥¸½±½½ÕĞ¥¸„E…½Õ¹Ğì)5Õµ‰…¤…ÕÑ½½µÁ±•Ñ”…¹„‰½Õ¹‘•™ÕÑÕÉ”Í•…É ìI•ÍÕ±ÑÌƒŠH…Í¡‰½…ÉƒŠH	…¬ì)ÑÉ…­¥¹œ½É•™É•Í ½É•µ½Ù…°ì„İ½É­•ÈÑ¥¬……¥¹ÍĞ„EÑÉ…­¥¹œÉ•½Éì…É”)%¹Ñ•±±¥•¹”™½ÉµÕ±„½‘…ä½¹ÑÉ½±ÌìÕ¹…Ù…¥±…‰±”½ÁÑ¥½¹…°ÁÉ½Ù¥‘•ÉÌì½İ¹•µÉ•½É)‘•¹¥…°™É½´„Í•½¹E…½Õ¹Ğìµ½‰¥±”…¹±¥¡Ğ½‘…É¬±…å½ÕĞ¸M•Á…É…Ñ”•¹Õ¥¹”)ÁÉ½Ù¥‘•ÈÉ•ÍÁ½¹Í•Ì™É½´‘•Ñ•Éµ¥¹¥ÍÑ¥ŒÑ•ÍĞ™¥áÑÕÉ•Ì¥¸Ñ¡”É•±•…Í”•Ù¥‘•¹”¸((ŒŒ$…¹É•±•…Í”•Ù¥‘•¹”()€¹¥Ñ¡Õˆ½İ½É­™±½İÌ½¤¹åµ±€…ĞÑ¡”É•Á½Í¥Ñ½ÉäÉ½½ĞÉÕ¹Ìè((´1½­•)…Ù…MÉ¥ÁĞ¥¹ÍÑ…±±Ì°±¥¹Ğ°½µ‰¥¹•‰…­•¹½™É½¹Ñ•¹µ¡•±Á•ÈÕ¹¥Ğ¡•­Ì°(€ÁÉ½‘ÕÑ¥½¸‰Õ¹‘±”…¹¡¥ µÍ•Ù•É¥Ñä¹Á´‘•Á•¹‘•¹ä…Õ‘¥ÑÌ¸(´¸¥Í½±…Ñ•5½¹½€àÉ•Á±¥„Í•Ğ°A$…¹Y¥Ñ”ìÉ•…°!QQ@½‘…Ñ…‰…Í”E…¹Ñ¡”(€…Í¡‰½…É‰É½İÍ•È™¥áÑÕÉ”©½ÕÉ¹•ä¸9¼Á…¥A$É•‘•¹Ñ¥…±Ì…É”½¹™¥ÕÉ•¸(´AåÑ¡½¸€Ì¸ÄĞ¸Ø¥¹ÍÑ…±°½½µÁ…Ñ¥‰¥±¥Ñä¡•­Ì°½µÁ¥±…Ñ¥½¸°‘•Ñ•Éµ¥¹¥ÍÑ¥ŒÕ¹¥ÑÑ•ÍĞ(€¥¹™•É•¹”½‘…Ñ„µÁ¥Á•±¥¹”½¹ÑÉ…ÑÌ…¹„ÍÑÉ¥ĞAåÑ¡½¸‘•Á•¹‘•¹ä…Õ‘¥Ğ¸()Q¡”$É•Á±¥„Í•Ğ¥Ì¹••ÍÍ…Éä™½ÈÑÉ…­¥¹œÑÉ…¹Í…Ñ¥½¹Ì…¹¥Ì‘•ÍÑÉ½å•İ¥Ñ )Ñ¡”ÉÕ¹¹•Èì¥Ğ‘½•Ì¹½Ğ½¹¹•ĞÑ¼Ñ¡”‘•Ù•±½Á•ÈÌ5½¹½¸Ù¥‘•¹”…ÉÑ¥™…ÑÌ)É•Ñ…¥¸Ñ•ÍĞÍÉ••¹Í¡½ÑÌ…¹±½…°Í•ÉÙ¥”±½Ì¸9¼QåÁ•MÉ¥ÁĞ¡•¬¥Ì½¹™¥ÕÉ•)‰•…ÕÍ”Ñ¡¥Ì…ÁÁ±¥…Ñ¥½¸¥Ì)…Ù…MÉ¥ÁĞ¸1¥Ù”µÁÉ½Ù¥‘•ÈÅÕ½Ñ„½…ÕÑ¡•¹Ñ¥…Ñ¥½¸°)¹•Ñİ½É¬µÍÁ•¥™¥ŒÉ½ÕÑ¥¹œ…¹…ÑÕ…°•Ù…±Õ…Ñ•µ½‘•°İ•¥¡ÑÌ…É”Í•Á…É…Ñ”Íµ½­”)¡•­Ì°¹½ĞÍ¥±•¹Ñ±äÍ­¥ÁÁ•‘•Ñ•Éµ¥¹¥ÍÑ¥ŒÑ•ÍÑÌ¸¥Ñ!Õˆ•á•ÕÑ¥½¸µÕÍĞ‰”)É•Ù¥•İ•…™Ñ•ÈÁÕÍ ì„±½…°Ñ•ÍĞÉ•ÍÕ±Ğ‘½•Ì¹½Ğ•ÍÑ…‰±¥Í „¡½ÍÑ•µ$Á…ÍÌ¸()I½±±‰…¬¥¹‘¥Ù¥‘Õ…°¡…¹•Í½ÕÉ”™¥±•Ì™É½´Ñ¡”¥¹½É•ÁÉ”µ¡…¹”…É¡¥Ù”)‘•ÍÉ¥‰•¥¸mÍÑ…‰¥±¥é…Ñ¥½¸µ…Õ‘¥Ğ¹µ‘t¡ÍÑ…‰¥±¥é…Ñ¥½¸µ…Õ‘¥Ğ¹µ¤¸AÉ•Í•ÉÙ”€¹•¹Ù€°Ñ¡”)•á¥ÍÑ¥¹œµ½‘•°…ÉÑ¥™…ÑÌ°‘…Ñ…‰…Í”É•½É‘Ì…¹Ñ¡”ÕÍ•ÈÌ¥Ğ¥¹‘•à¸É…¥¸…Ñ¥Ù”)İ½É­•ÉÌ‰•™½É”¡…¹¥¹œ½‘”ìÍ¡ÕÑ‘½İ¸İ…¥ÑÌ™½È¥¸µÁÉ½É•ÍÌİ½É¬°İ¥Ñ „‰½Õ¹‘•)‘•…‘±¥¹”…¹±•…Í”É•½Ù•Éä¥˜„¡½ÍĞ™½É•ÌÑ•Éµ¥¹…Ñ¥½¸¸(

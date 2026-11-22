@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import { randomUUID } from 'node:crypto';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import mongoose from 'mongoose';
 import { getDatabaseHealth } from './config/database.js';
 import { allowedOrigins } from './config/runtime.js';
@@ -11,8 +13,15 @@ import authRoutes from './routes/authRoutes.js';
 import trackedFlightRoutes from './routes/trackedFlightRoutes.js';
 import { operationSnapshot, requireOperationsToken } from './services/operations.js';
 
+const webDistDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
+
 export function createApp({ origins = allowedOrigins(), databaseHealth = getDatabaseHealth } = {}) {
   const app = express();
+  const serveWeb = process.env.SERVE_WEB === 'true';
+  const sendWebIndex = (req, res, next) => res.sendFile(resolve(webDistDirectory, 'index.html'), {
+    cacheControl: false,
+    headers: { 'Cache-Control': 'no-cache' },
+  }, (error) => { if (error) next(error); });
   app.disable('x-powered-by');
   if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
   app.use((req, res, next) => {
@@ -25,7 +34,19 @@ export function createApp({ origins = allowedOrigins(), databaseHealth = getData
     allowedHeaders: ['Content-Type', 'X-SkyScout-Request', 'Authorization'], exposedHeaders: ['X-Request-Id', 'Retry-After'] }));
   app.use(protectMutations(origins));
   app.use(express.json({ limit: '32kb', strict: true }));
-  app.get('/', (req, res) => res.json({ success: true, message: 'SkyScout Backend Running' }));
+  if (serveWeb) {
+    app.use(express.static(webDistDirectory, {
+      index: false,
+      dotfiles: 'deny',
+      setHeaders(res, filePath) {
+        const relativePath = filePath.slice(webDistDirectory.length).replaceAll('\\', '/');
+        res.setHeader('Cache-Control', relativePath.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache');
+      },
+    }));
+  }
+  app.get('/', (req, res, next) => serveWeb
+    ? sendWebIndex(req, res, next)
+    : res.json({ success: true, message: 'SkyScout Backend Running' }));
   app.get('/health', (req, res) => {
     const database = databaseHealth();
     res.json({ success: true, status: database.state === 'connected' ? 'ok' : 'degraded', uptimeSeconds: Math.floor(process.uptime()),
@@ -54,6 +75,11 @@ export function createApp({ origins = allowedOrigins(), databaseHealth = getData
   app.use('/api/flights', flightRoutes);
   app.use('/api/auth', authRoutes);
   app.use('/api/tracked-flights', trackedFlightRoutes);
+  if (serveWeb) {
+    app.get(/^\/(?!api(?:\/|$)|health(?:\/|$)|readyz(?:\/|$)).*/, (req, res, next) => {
+      sendWebIndex(req, res, next);
+    });
+  }
   app.use((req, res) => res.status(404).json({ success: false, message: 'Not found.' }));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
