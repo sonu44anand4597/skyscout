@@ -112,7 +112,7 @@ try {
   // Explicit negative session fixture; all catalog and asset checks above are real.
   const outageScript = await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.__sessionOutage=true;` });
   await call('Page.navigate', { url: 'http://127.0.0.1:5050/dashboard' });
-  await until(() => evaluate(`document.body.innerText.includes('Your session could not be checked')`), 'session outage disclosure');
+  await until(() => evaluate(`Boolean(document.body?.innerText.includes('Your session could not be checked'))`), 'session outage disclosure');
   assert.equal(await evaluate('location.pathname'), '/dashboard');
   await evaluate(`window.__sessionOutage=false;Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Try again').click()`);
   await until(() => evaluate(`location.pathname==='/login'&&Boolean(document.querySelector('input[type="password"]'))`), 'session retry resolves actual guest');
