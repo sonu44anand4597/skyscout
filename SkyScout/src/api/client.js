@@ -1,7 +1,8 @@
 const developmentApiOrigin = typeof window === "undefined"
   ? "http://127.0.0.1:5000"
   : `http://${window.location.hostname.includes(":") ? `[${window.location.hostname}]` : window.location.hostname}:5000`;
-const API_BASE = import.meta.env?.VITE_API_URL || (import.meta.env?.PROD ? '/api' : `${developmentApiOrigin}/api`);
+const viteEnv = import.meta.env || {};
+const API_BASE = viteEnv.VITE_API_URL || (viteEnv.PROD ? '/api' : `${developmentApiOrigin}/api`);
 
 export async function apiRequest(path, { method = "GET", body, signal, timeoutMs = 25000 } = {}) {
   let response;
@@ -36,3 +37,4 @@ export async function getServiceHealth() {
   if (!response.ok) throw new Error("Health status unavailable.");
   return response.json();
 }
+
