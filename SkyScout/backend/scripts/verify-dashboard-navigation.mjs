@@ -69,7 +69,7 @@ try {
   }
   const clickDashboard = () => evaluate(`document.querySelector('nav[aria-label="Flight results actions"] a').click()`);
   const searchCount = () => evaluate(`window.__qaRequests.filter(r=>r.path==='/api/flights/search').length`);
-  async function authenticatedDashboard() { await until(() => evaluate(`location.pathname==='/dashboard'&&document.body.innerText.includes('Notifications')`), 'authenticated dashboard'); }
+  async function authenticatedDashboard() { await until(() => evaluate(`location.pathname==='/dashboard'&&Boolean(document.body?.innerText.includes('Notifications'))`), 'authenticated dashboard'); }
 
   console.log('Navigation QA: Dashboard in loading/error/empty states and guest login return');
   await search('slow'); assert.ok(await evaluate(`!document.querySelector('article')`)); evidence.checks.loadingButton = true;
@@ -194,4 +194,3 @@ finally {
   await ProviderState.deleteMany({ key: { $in: refs.map(ref => `track:${ref}`) } });
   await closeDatabase(); await mkdir(output, { recursive: true }); await writeFile(`${output}/dashboard-navigation.json`, JSON.stringify(evidence, null, 2)); console.log(JSON.stringify(evidence));
 }
-
