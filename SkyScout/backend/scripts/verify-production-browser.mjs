@@ -14,8 +14,10 @@ assert.ok(policy);
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.webp': 'image/webp', '.woff2': 'font/woff2', '.svg': 'image/svg+xml' };
 const evidence = { executedAt: new Date().toISOString(), source: 'Real production bundle, real browser, nginx-equivalent CSP and actual API/catalog; no paid providers', viewports: [], checks: {} };
 const server = http.createServer(async (req, res) => {
+  let requestPath;
   try {
     const url = new URL(req.url, 'http://127.0.0.1:5050');
+    requestPath = url.pathname;
     if (url.pathname.startsWith('/api/') || ['/health', '/readyz'].includes(url.pathname)) {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
@@ -31,7 +33,13 @@ const server = http.createServer(async (req, res) => {
     if (!path.extname(file)) file = path.join(root, 'index.html');
     const data = await readFile(file);
     res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Content-Security-Policy': policy, 'Cache-Control': 'no-store' }).end(data);
-  } catch { res.writeHead(404).end('Unavailable'); }
+  } catch (error) {
+    if (requestPath?.startsWith('/api/')) {
+      evidence.proxyFailures ||= [];
+      evidence.proxyFailures.push({ path: requestPath, errorName: error.name, code: error.cause?.code || error.code || 'unknown' });
+    }
+    res.writeHead(requestPath?.startsWith('/api/') ? 502 : 404).end('Unavailable');
+  }
 });
 let browser;
 try {
@@ -44,7 +52,7 @@ try {
   evidence.checks.airportApiCatalog = true;
   browser = await browserSession(9241);
   const { call, evaluate, fill } = browser;
-  await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.__csp=[];document.addEventListener('securitypolicyviolation',e=>window.__csp.push({directive:e.violatedDirective,uri:e.blockedURI}));` });
+  await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.__csp=[];window.__fetchTrace=[];document.addEventListener('securitypolicyviolation',e=>window.__csp.push({directive:e.violatedDirective,uri:e.blockedURI}));const originalFetch=window.fetch.bind(window);window.fetch=async(...args)=>{const url=new URL(String(args[0]),location.href);try{const response=await originalFetch(...args);if(url.pathname.startsWith('/api/'))window.__fetchTrace.push({path:url.pathname,status:response.status});return response}catch(error){if(url.pathname.startsWith('/api/'))window.__fetchTrace.push({path:url.pathname,errorName:error.name,error:error.message});throw error}};` });
   await call('Page.navigate', { url: 'http://127.0.0.1:5050' });
   await until(() => evaluate(`Boolean(document.querySelector('#hero-title'))`), 'production home');
   await evaluate(`document.fonts.ready`);
@@ -69,7 +77,7 @@ try {
   try {
     await until(() => evaluate(`Array.from(document.querySelectorAll('[role="option"]')).some(e=>e.textContent.includes('BOM'))`), 'production Mumbai catalog');
   } catch (error) {
-    evidence.airportAutocompleteDiagnostic = await evaluate(`({value:document.querySelector('#flight-search input[role="combobox"]')?.value,dropdown:document.querySelector('[role="listbox"]')?.innerText,status:document.querySelector('[role="listbox"] [role="status"]')?.innerText})`);
+    evidence.airportAutocompleteDiagnostic = await evaluate(`({value:document.querySelector('#flight-search input[role="combobox"]')?.value,dropdown:document.querySelector('[role="listbox"]')?.innerText,status:document.querySelector('[role="listbox"] [role="status"]')?.innerText,fetchTrace:window.__fetchTrace,csp:window.__csp})`);
     throw error;
   }
   evidence.checks.catalogAutocomplete = true;
@@ -120,4 +128,3 @@ finally {
   await mkdir(output, { recursive: true }); await writeFile(`${output}/production-browser.json`, JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify(evidence));
 }
-
