@@ -37,6 +37,11 @@ let browser;
 try {
   await mkdir(output, { recursive: true });
   await new Promise((resolve) => server.listen(5050, '127.0.0.1', resolve));
+  const airportResponse = await fetch(`${upstream.replace(/\/$/, '')}/flights/airports?q=Mumbai`);
+  const airportPayload = await airportResponse.json();
+  assert.equal(airportResponse.status, 200, 'production airport API response');
+  assert.ok(airportPayload.data?.some((airport) => airport.iata === 'BOM'), 'production airport API returns Mumbai');
+  evidence.checks.airportApiCatalog = true;
   browser = await browserSession(9241);
   const { call, evaluate, fill } = browser;
   await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.__csp=[];document.addEventListener('securitypolicyviolation',e=>window.__csp.push({directive:e.violatedDirective,uri:e.blockedURI}));` });
@@ -60,8 +65,13 @@ try {
   const dark = await call('Page.captureScreenshot', { format: 'png' }); await writeFile(`${output}/home-dark.png`, Buffer.from(dark.data, 'base64'));
   const id = await evaluate(`document.querySelector('#flight-search input[role="combobox"]').id`);
   await evaluate(`document.getElementById(${JSON.stringify(id)}).focus()`);
-  await fill(`[id=${JSON.stringify(id)}]`, 'Mumbai');
-  await until(() => evaluate(`Array.from(document.querySelectorAll('[role="option"]')).some(e=>e.textContent.includes('BOM'))`), 'production Mumbai catalog');
+  await call('Input.insertText', { text: 'Mumbai' });
+  try {
+    await until(() => evaluate(`Array.from(document.querySelectorAll('[role="option"]')).some(e=>e.textContent.includes('BOM'))`), 'production Mumbai catalog');
+  } catch (error) {
+    evidence.airportAutocompleteDiagnostic = await evaluate(`({value:document.querySelector('#flight-search input[role="combobox"]')?.value,dropdown:document.querySelector('[role="listbox"]')?.innerText,status:document.querySelector('[role="listbox"] [role="status"]')?.innerText})`);
+    throw error;
+  }
   evidence.checks.catalogAutocomplete = true;
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown' });
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
@@ -74,7 +84,7 @@ try {
   await evaluate(`(()=>{const original=window.fetch.bind(window);window.fetch=(...args)=>String(args[0]).includes('/flights/search?')?Promise.resolve(new Response(JSON.stringify({success:true,data:[${JSON.stringify(fixture)}],searchedAt:new Date().toISOString()}),{headers:{'Content-Type':'application/json'}})):String(args[0]).includes('/flights/return-options/')?Promise.resolve(new Response(JSON.stringify({success:true,data:[]}),{headers:{'Content-Type':'application/json'}})):original(...args)})()`);
   const destinationId = await evaluate(`document.querySelectorAll('#flight-search input[role="combobox"]')[1].id`);
   await evaluate(`document.getElementById(${JSON.stringify(destinationId)}).focus()`);
-  await fill(`[id=${JSON.stringify(destinationId)}]`, 'Delhi');
+  await call('Input.insertText', { text: 'Delhi' });
   await until(() => evaluate(`Array.from(document.querySelectorAll('[role="option"]')).some(e=>e.textContent.includes('DEL'))`), 'destination catalog');
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown' });
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
@@ -110,3 +120,4 @@ finally {
   await mkdir(output, { recursive: true }); await writeFile(`${output}/production-browser.json`, JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify(evidence));
 }
+
