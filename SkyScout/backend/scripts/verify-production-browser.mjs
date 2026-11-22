@@ -52,7 +52,7 @@ try {
   evidence.checks.airportApiCatalog = true;
   browser = await browserSession(9241);
   const { call, evaluate, fill } = browser;
-  await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.__csp=[];window.__fetchTrace=[];document.addEventListener('securitypolicyviolation',e=>window.__csp.push({directive:e.violatedDirective,uri:e.blockedURI}));const originalFetch=window.fetch.bind(window);window.fetch=async(...args)=>{const url=new URL(String(args[0]),location.href);try{const response=await originalFetch(...args);if(url.pathname.startsWith('/api/'))window.__fetchTrace.push({path:url.pathname,status:response.status});return response}catch(error){if(url.pathname.startsWith('/api/'))window.__fetchTrace.push({path:url.pathname,errorName:error.name,error:error.message});throw error}};` });
+  await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.__csp=[];window.__fetchTrace=[];window.__sessionOutage=false;document.addEventListener('securitypolicyviolation',e=>window.__csp.push({directive:e.violatedDirective,uri:e.blockedURI}));const originalFetch=window.fetch.bind(window);window.fetch=async(...args)=>{const url=new URL(String(args[0]),location.href);if(window.__sessionOutage&&url.pathname.endsWith('/auth/me')){window.__fetchTrace.push({path:url.pathname,status:503,fixture:true});return new Response(JSON.stringify({message:'Controlled session service outage'}),{status:503,headers:{'Content-Type':'application/json'}})}try{const response=await originalFetch(...args);if(url.pathname.startsWith('/api/'))window.__fetchTrace.push({path:url.pathname,status:response.status});return response}catch(error){if(url.pathname.startsWith('/api/'))window.__fetchTrace.push({path:url.pathname,errorName:error.name,error:error.message});throw error}};` });
   await call('Page.navigate', { url: 'http://127.0.0.1:5050' });
   await until(() => evaluate(`Boolean(document.querySelector('#hero-title'))`), 'production home');
   await evaluate(`document.fonts.ready`);
@@ -110,7 +110,7 @@ try {
   evidence.homeCspViolations = await evaluate('window.__csp');
   assert.deepEqual(evidence.homeCspViolations, []);
   // Explicit negative session fixture; all catalog and asset checks above are real.
-  const outageScript = await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.__sessionOutage=true;const originalFetch=window.fetch.bind(window);window.fetch=(...args)=>window.__sessionOutage&&String(args[0]).endsWith('/auth/me')?Promise.resolve(new Response(JSON.stringify({message:'Controlled session service outage'}),{status:503,headers:{'Content-Type':'application/json'}})):originalFetch(...args);` });
+  const outageScript = await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.__sessionOutage=true;` });
   await call('Page.navigate', { url: 'http://127.0.0.1:5050/dashboard' });
   await until(() => evaluate(`document.body.innerText.includes('Your session could not be checked')`), 'session outage disclosure');
   assert.equal(await evaluate('location.pathname'), '/dashboard');
@@ -122,7 +122,11 @@ try {
   assert.deepEqual(evidence.cspViolations, []);
   assert.deepEqual(browser.errors, []);
   evidence.runtimeExceptions = browser.errors;
-} catch (error) { evidence.failure = error.message; process.exitCode = 1; }
+} catch (error) {
+  evidence.failure = error.message;
+  if (error.message.includes('session')) evidence.sessionDiagnostic = await evaluate(`({path:location.pathname,authRequests:(window.__fetchTrace||[]).filter(request=>request.path.endsWith('/auth/me')),disclosure:Boolean(document.body?.innerText.includes('Your session could not be checked')),retryButton:Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Try again')})`).catch(() => null);
+  process.exitCode = 1;
+}
 finally {
   await browser?.close(); await new Promise((resolve) => server.close(resolve));
   await mkdir(output, { recursive: true }); await writeFile(`${output}/production-browser.json`, JSON.stringify(evidence, null, 2));
