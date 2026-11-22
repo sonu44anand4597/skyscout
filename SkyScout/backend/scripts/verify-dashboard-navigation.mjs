@@ -165,7 +165,7 @@ try {
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
   await until(async () => (await TrackedFlight.findById(trackedId).lean()).targetPrice === 10000, 'target persisted');
   await until(() => evaluate(`!document.querySelector('#tracked-flight-${trackedId} button')?.disabled`), 'target update rendered');
-  await evaluate(`Array.from(document.querySelectorAll('#tracked-flight-${trackedId} button')).find(b=>b.textContent==='Check fare').click()`);
+  await until(() => evaluate(`(()=>{const button=Array.from(document.querySelectorAll('#tracked-flight-${trackedId} button')).find(b=>b.textContent==='Check fare');if(!button||button.disabled)return false;button.click();return true})()`), 'manual check button ready');
   await until(() => evaluate(`window.__qaRequests.some(r=>r.path==='/api/tracked-flights/${trackedId}/refresh'&&r.status===202)`), 'manual check queued');
   assert.equal((await TrackedFlight.findById(trackedId).lean()).currentPrice, 10500);
   evidence.checks.manualCheckAndTarget = true;
